@@ -4,7 +4,7 @@
 module HealthCheck
 
   class Engine < Rails::Engine
-    cattr_accessor :routes_explicitly_defined 
+    cattr_accessor :routes_explicitly_defined
   end
 
   # Text output upon success
@@ -70,6 +70,10 @@ module HealthCheck
   # Allow non-standard redis url
   mattr_accessor :redis_url
   self.redis_url = nil
+
+  # Allow non-standard redis config
+  mattr_accessor :redis_config
+  self.redis_config = {}
 
   # Include the error in the response body. You may want to set this to false
   # if your /health_check endpoint is open to the public internet
