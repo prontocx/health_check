@@ -6,13 +6,13 @@ module HealthCheck
 
     @@default_smtp_settings =
         {
-            :address              => "localhost",
-            :port                 => 25,
-            :domain               => 'localhost.localdomain',
-            :user_name            => nil,
-            :password             => nil,
-            :authentication       => nil,
-            :enable_starttls_auto => true,
+            address:               "localhost",
+            port:                  25,
+            domain:                'localhost.localdomain',
+            user_name:             nil,
+            password:              nil,
+            authentication:        nil,
+            enable_starttls_auto:  true
         }
 
     cattr_accessor :default_smtp_settings
@@ -55,6 +55,8 @@ module HealthCheck
             errors << HealthCheck::RedisHealthCheck.check if defined?(::Redis)
           when 's3-if-present'
             errors << HealthCheck::S3HealthCheck.check if defined?(::Aws)
+          when 'elasticsearch-if-present'
+            errors << HealthCheck::ElasticsearchHealthCheck.check if defined?(::Elasticsearch)
           when 'resque-redis'
             errors << HealthCheck::ResqueHealthCheck.check
           when 'sidekiq-redis'
@@ -63,6 +65,10 @@ module HealthCheck
             errors << HealthCheck::RedisHealthCheck.check
           when 's3'
             errors << HealthCheck::S3HealthCheck.check
+          when 'elasticsearch'
+            errors << HealthCheck::ElasticsearchHealthCheck.check
+          when 'rabbitmq'
+            errors << HealthCheck::RabbitMQHealthCheck.check
           when "standard"
             errors << HealthCheck::Utils.process_checks(HealthCheck.standard_checks, called_from_middleware)
           when "middleware"
@@ -84,15 +90,16 @@ module HealthCheck
               return "invalid argument to health_test."
             end
         end
+        errors << '. ' unless errors == '' || errors.end_with?('. ')
       end
-      return errors
+      return errors.strip
     rescue => e
       return e.message
     end
 
     def self.db_migrate_path
       # Lazy initialisation so Rails.root will be defined
-      @@db_migrate_path ||= File.join(Rails.root, 'db', 'migrate')
+      @@db_migrate_path ||= File.join(::Rails.root, 'db', 'migrate')
     end
 
     def self.db_migrate_path=(value)
@@ -135,36 +142,43 @@ module HealthCheck
       status = ''
       begin
         if @skip_external_checks
-          status = '221'
+          status = '250'
         else
-          Timeout::timeout(timeout) do |timeout_length|
-            t = TCPSocket.new(settings[:address], settings[:port])
-            begin
-              status = t.gets
-              while status != nil && status !~ /^2/
-                status = t.gets
-              end
-              t.puts "HELO #{settings[:domain]}\r"
-              while status != nil && status !~ /^250/
-                status = t.gets
-              end
-              t.puts "QUIT\r"
-              status = t.gets
-            ensure
-              t.close
-            end
+          smtp = Net::SMTP.new(settings[:address], settings[:port])
+          smtp.enable_starttls if settings[:enable_starttls_auto]
+          smtp.open_timeout = timeout
+          smtp.read_timeout = timeout
+          smtp.start(settings[:domain], settings[:user_name], settings[:password], settings[:authentication]) do
+            status = smtp.helo(settings[:domain]).status
           end
         end
-      rescue Errno::EBADF => ex
-        status = "Unable to connect to service"
       rescue Exception => ex
         status = ex.to_s
       end
-      (status =~ /^221/) ? '' : "SMTP: #{status || 'unexpected EOF on socket'}. "
+      (status =~ /^250/) ? '' : "SMTP: #{status || 'unexpected error'}. "
     end
 
     def self.check_cache
-      Rails.cache.write('__health_check_cache_test__', 'ok', :expires_in => 1.second) ? '' : 'Unable to write to cache. '
+      t = Time.now.to_i
+      value = "ok #{t}"
+      ret = ::Rails.cache.read('__health_check_cache_test__')
+      if ret.to_s =~ /^ok (\d+)$/ 
+        diff = ($1.to_i - t).abs
+        return('Cache expiry is broken. ') if diff > 30
+      elsif ret
+        return 'Cache is returning garbage. '
+      end
+      if ::Rails.cache.write('__health_check_cache_test__', value, expires_in: 2.seconds)
+        ret = ::Rails.cache.read('__health_check_cache_test__')
+        if ret =~ /^ok (\d+)$/ 
+          diff = ($1.to_i - t).abs
+          (diff < 2 ? '' : 'Out of date cache or time is skewed. ')
+        else
+          'Unable to read from cache. '
+        end
+      else
+        'Unable to write to cache. '
+      end
     end
 
   end

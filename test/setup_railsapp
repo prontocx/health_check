@@ -2,15 +2,27 @@
 
 route_prefix=medical_check
 
-err_report() {
-    echo "$0: Error on line $1 - aborted"
-    exit 1
+# Any failure causes exit
+set -eE -o functrace
+
+report_failure() {
+  local lineno=$2
+  local fn=$3
+  local exitstatus=$4
+  local msg=$5
+  local lineno_fns=${1% 0}
+  if [[ $lineno_fns != "0" ]] ; then
+    lineno="${lineno} ${lineno_fns}"
+  fi
+  if [[ $exitstatus == 0 ]] ; then
+    echo "${BASH_SOURCE[1]}: Finished!"
+  else
+    echo "${BASH_SOURCE[1]}:${fn}[${lineno}] Failed with status ${exitstatus}: $msg"
+  fi
 }
 
-trap 'err_report $LINENO' ERR
+trap 'report_failure "${BASH_LINENO[*]}" "$LINENO" "${FUNCNAME[*]:-script}" "$?" "$BASH_COMMAND"' ERR
 
-# Any failure causes exit
-set -e
 
 case "$1" in
 [0-9]*)
@@ -54,7 +66,7 @@ mkdir -p tmp/gems
 if $rbenv_which bundle ; then
   echo Bundler is installed
 else
-  gem install bundler
+  gem install bundler ${BUNDLER_VERSION:+-v ${BUNDLER_VERSION}}
   $rehash
 fi
 
@@ -62,6 +74,13 @@ echo "Running bundle with BUNDLE_GEMFILE=$BUNDLE_GEMFILE ..."
 if ! smarter_bundle ; then
     echo "Test aborted (missing required gems)"
     exit 2
+elif [ ! -s $BUNDLE_GEMFILE.lock ] ; then
+    echo "Error: smarter_bundler return OK status BUT lock file ($BUNDLE_GEMFILE.lock) is missing!"
+    exit 3
+else
+    echo bundle passed - lock file contains:
+    cat $BUNDLE_GEMFILE.lock
+    echo
 fi
 $rehash
 
@@ -69,9 +88,9 @@ rails="$base_dir/test/bin/rails"
 rake="$base_dir/test/bin/rake"
 
 echo Checking $rails is present ...
-[ -f $rails -a -f $rake ] || bundle exec rake rails:update:bin || echo '(ignored rake rails:update:bin exit status)'
-[ -f $rails ] || bundle binstubs railties || echo '(ignored bundle exit status)'
-[ -f $rails ] || bundle binstubs rails || echo '(ignored bundle exit status)'
+[ -f $rails -a -f $rake ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} exec rake rails:update:bin || echo '(ignored rake rails:update:bin exit status)'
+[ -f $rails ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs railties || echo '(ignored bundle exit status)'
+[ -f $rails ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs rails || echo '(ignored bundle exit status)'
 if [ ! -f $rails ]; then
     echo "Test aborted (unable to create $rails)"
     exit 2
@@ -79,7 +98,7 @@ fi
 
 if [ ! -f $rake ]; then
     echo "Running bundle binstubs rake ..."
-    if ! bundle binstubs rake || [ ! -f $rake ]; then
+    if ! bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs rake || [ ! -f $rake ]; then
         echo "Test aborted (unable to create $rake)"
         exit 2
     fi
@@ -124,16 +143,25 @@ esac
 
 echo "Creating $actual_rails_version app in $tmp_dir/railsapp using adapter $db"
 case "$actual_rails_version" in
-    *' '[12].*)
-        $rails railsapp -d $db
-        ;;
     *' '[345].*)
+        args="--skip-bundle -d $db"
         case "$BUNDLE_GEMFILE" in
         *rails_edge.gemfile)
-            $rails new railsapp --skip-bundle -d $db --edge
+            $rails new railsapp $args --edge
             ;;
         *)
-            $rails new railsapp --skip-bundle -d $db
+            $rails new railsapp $args
+            ;;
+        esac
+        ;;
+    *' '[6].*)
+        args="--skip-bundle -d $db --skip-git --skip-bootsnap"
+        case "$BUNDLE_GEMFILE" in
+        *rails_edge.gemfile)
+            $rails new railsapp $args --edge
+            ;;
+        *)
+            $rails new railsapp $args
             ;;
         esac
         ;;
@@ -155,32 +183,48 @@ echo "Configuring mailer to point to fake_smtp_server port 3555"
 cat >> config/environment.rb <<'!EOF!'
 
 ActionMailer::Base.delivery_method = :smtp
-ActionMailer::Base.smtp_settings = { :address => "localhost", :port => 3555 }
+ActionMailer::Base.smtp_settings = { address: "localhost", port: 3555 }
 
 !EOF!
 
 echo Adding an initializer for health_check gem ...
 mkdir -p config/initializers
 tee config/initializers/health_check.rb <<!
-HealthCheck.setup do |config|
-  config.success = "$success"
-  config.smtp_timeout = 60.0
-  config.http_status_for_error_text = 550
-  config.http_status_for_error_object = 555
-  config.uri = '$route_prefix'
-  config.origin_ip_whitelist = ENV['IP_WHITELIST'].split(',') unless ENV['IP_WHITELIST'].blank?
-  config.basic_auth_username = ENV['AUTH_USER'] unless ENV['AUTH_USER'].blank?
-  config.basic_auth_password = ENV['AUTH_PASSWORD'] unless ENV['AUTH_PASSWORD'].blank?
+require 'fileutils'
 
-  config.add_custom_check do
-    File.exists?("$custom_file") ? '' : '$custom_file is missing!'
+if defined? HealthCheck
+  HealthCheck.setup do |config|
+    config.success = "$success"
+    config.smtp_timeout = 60.0
+    config.http_status_for_error_text = 550
+    config.http_status_for_error_object = 555
+    config.uri = '$route_prefix'
+    config.origin_ip_whitelist = ENV['IP_WHITELIST'].split(',') unless ENV['IP_WHITELIST'].blank?
+    config.basic_auth_username = ENV['AUTH_USER'] unless ENV['AUTH_USER'].blank?
+    config.basic_auth_password = ENV['AUTH_PASSWORD'] unless ENV['AUTH_PASSWORD'].blank?
+  
+    config.add_custom_check do
+      File.exists?("$custom_file") ? '' : '$custom_file is missing!'
+    end
+  
+    config.add_custom_check('pass') do
+      ''
+    end
+  
+    config.on_failure do |checks, msg|
+      File.open('tmp/health_check_failure.txt', 'w') do |f|
+        f.puts "FAILED: #{checks}, MESSAGE: #{msg}"
+      end
+    end
+  
+    config.on_success do |checks|
+      File.open('tmp/health_check_success.txt', 'w') do |f|
+        f.puts "PASSED: #{checks}"
+      end
+    end
+  
+    config.include_error_in_response_body = ENV['HIDE_ERROR_RESPONSE'].to_s !~ /^[1tTyY]/
   end
-
-  config.add_custom_check('pass') do
-    ''
-  end
-
-  config.include_error_in_response_body = false if ENV['HIDE_ERROR_RESPONSE'].present?
 end
 !
 
@@ -195,7 +239,7 @@ then
     exit 2
 fi
 echo Adding health_check as gem to Gemfile...
-echo "gem 'health_check', :path => '$base_dir'" >> Gemfile
+echo "gem 'health_check', path: '$base_dir'" >> Gemfile
 
 case "$RAILS_SERVER" in
 webrick|'')
@@ -206,29 +250,59 @@ webrick|'')
         echo "gem '$RAILS_SERVER'" >> Gemfile
         ;;
 esac
-egrep REQUIRED < ${INITIAL_BUNDLE_GEMFILE} >> Gemfile || echo No required gems found...
+TAB=$'\t'
+QUOTES='"'"'"
+case "$actual_rails_version" in
+*' '5.0*)
+  if egrep -i 'gem.*sqlite3' Gemfile ; then
+     # Can't do this as a require as we may go back to testing JRuby
+     echo Force sqlite to 1.3.13+ version for Rails 5.0 ...
+     gem=sqlite3
+     sed -i.bak -e "s/^\([ ${TAB}]*gem[ ${TAB}]*[${QUOTES}]${gem}[${QUOTES}]\)\(.*\)$/\1, '~> 1.3.13' # overriden: \2/" Gemfile
+  fi
+  ;;
+esac
+if egrep -q REQUIRED ${INITIAL_BUNDLE_GEMFILE} ; then
+  sed -n "s/^[ ${TAB}]*gem[ ${TAB}]*[${QUOTES}]\([^${QUOTES}]*\)[${QUOTES}].*REQUIRED.*/\1/p" ${INITIAL_BUNDLE_GEMFILE} | while read gem
+  do
+    echo "Commenting out gem '$gem' line in Gemfile"
+    sed -i.bak -e "s/^\([ ${TAB}]*gem[ ${TAB}]*[${QUOTES}]${gem}[${QUOTES}].*\)$/# overriden by REQUIRED below: \1/" Gemfile
+  done
+  echo Adding Required gems
+  egrep REQUIRED ${INITIAL_BUNDLE_GEMFILE} | tee -a Gemfile
+else
+  echo No required gems to be added to Gemfile 
+fi
+
 echo
-echo ================= Gemfile ===================
+echo ================= $PWD/Gemfile ===================
 cat Gemfile
 echo
-echo running bundle install
-smarter_bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} install
+echo ==================================================
+echo running smarter_bundle install
+smarter_bundle install
 $rehash
+
+if egrep webpacker Gemfile && [ ! -f config/webpacker.yml ] ; then
+  echo completing setup by running rails webpacker:install ...
+  $rails webpacker:install
+fi
+
 echo "Using binstubs in $railsapp/bin for rails and rake commands"
 rails="$railsapp/bin/rails"
 rake="$railsapp/bin/rake"
 
 echo Checking $rails is present ...
-[ -f $rails -a -f $rake ] || bundle exec rake rails:update:bin || echo '(ignored rake rails:update:bin exit status)'
-[ -f $rails ] || bundle binstubs railties || echo '(ignored bundle exit status)'
-[ -f $rails ] || bundle binstubs rails || echo '(ignored bundle exit status)'
+[ -f $rails -a -f $rake ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} exec rake rails:update:bin || echo '(ignored rake rails:update:bin exit status)'
+[ -f $rails ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs railties || echo '(ignored bundle exit status)'
+[ -f $rails ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs rails || echo '(ignored bundle exit status)'
 if [ ! -f $rails ]; then
     echo "Test aborted (unable to create $rails)"
     exit 2
 fi
 
 echo Checking $rake is present ...
-[ -f $rake ] || bundle binstubs rake || echo '(ignored bundle exit status)'
+[ -f $rake ] || bundle ${BUNDLER_VERSION:+_${BUNDLER_VERSION}_} binstubs rake || echo '(ignored bundle exit status)'
 if [ ! -f $rake ]; then
     echo "Test aborted (unable to create $rake)"
     exit 2
@@ -237,8 +311,9 @@ fi
 $rehash
 # Fix for rvm, otherwise bundle run from rails create fails
 export PATH="`pwd`/bin:$PATH"
-echo ================= Gemfile.lock ===================
+echo ================= $PWD/Gemfile.lock ===================
 cat Gemfile.lock
+echo ==================================================
 echo
 
 for e in test ${RAILS_ENV2:-production}
@@ -252,11 +327,22 @@ do
       echo
     fi
 done
-echo "============== config/environment.rb ============="
+
+if egrep -q 'bootsnap.setup' config/boot.rb  ; then
+  echo Commenting out bootsnap from config/boot.rb
+  sed -i.bak -e 's/^\(.*bootsnap.setup\)/# \1/' config/boot.rb 
+  echo "============== $PWD/config/boot.rb ============="
+  cat config/boot.rb
+  echo ==================================================
+fi
+rm -rf tmp/cache/bootsnap*
+echo 
+
+echo "============== $PWD/config/environment.rb ============="
 cat config/environment.rb
 echo 
 
-echo ========================
+echo =========================================================
 case $db in
     jdbcsqlite3)
       for e in test ${RAILS_ENV2:-production}
@@ -347,11 +433,11 @@ cat > app/controllers/example_controller.rb <<'EOF'
 class ExampleController < ApplicationController
 
   def index
-    render :plain => 'example page'
+    render plain: 'example page'
   end
   
   def catchall
-    render :plain => 'catch all route'
+    render plain: 'catch all route'
   end
   
 end
@@ -385,7 +471,7 @@ case "$MIDDLEWARE" in
 
     #echo =============== config/application.rb-old ========================
     #cat config/application.rb-old
-    echo =============== config/application.rb ========================
+    echo =============== $PWD/config/application.rb ========================
     cat config/application.rb
   else
     echo FAILED: NO config/application.rb file!!
@@ -409,11 +495,12 @@ if [ -s config/routes.rb ]; then
     # rails 3.0+
     echo "  # -----------------------------------------"
     echo "  # START OF SECTION FOR TESTING HEALTH_CHECK"
-    echo "  get 'example(/:action(/:id))(.:format)' => 'example'"
+    echo "  get 'example/catchall(.:format)', controller: :example, action: :catchall"
+    echo "  get 'example(.:format)', controller: :example, action: :index"
     echo "  if File.exists?('$catchall_file')"
     echo "    health_check_routes"
     echo "    # CATCH ALL ROUTE"
-    echo "    get '*path', :to => 'example#catchall'"
+    echo "    get '*path', controller: :example, action: :catchall"
     echo "  end"
     echo "  # END OF SECTION FOR TESTING HEALTH_CHECK"
     echo "  # ---------------------------------------"

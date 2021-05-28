@@ -1,5 +1,37 @@
 = Change Log =
 
+* 3.1.0 - 26 May 2021
+  * Updated README to clarify railsN branch status (they are intended to be stable, development to be a feature branch off them or master)
+  * Updated README with all the settings
+  * Updated all the branches to work with the latest travis and gem changes, as some gems needed to be locked down.
+  * Updated to test rails 6.0 and 6.1
+  * Got all travis tests passing
+  * Removed old, unused branches
+  * Merged PR Fix broken Cache-Control headers #93 from felixbuenemann 
+  * Merged PR S3 should not depend on Rails secrets file #77 by natefaerber
+  * Merged PR RabbitMQ Health check #98 from rhuanbarreto
+  * Merged PR Use remote_ip to accept proxy-forwarded requests #102 by alessio-signorini but made it optional
+  * Fixed up failure setting to match previous output on error, and use it as a prefix when the error message is also output (not by default)
+  * Always log the error to rails log even if not including in html response
+  * Merged PR ensure REDIS connections are closed #88 from yld
+  * Merged PR more robust cache check #90 from masciugo
+  * Merged PR Add log_level config setting which defaults to 'info'. #97 from FloHeinle 
+  * Merged PR get rid of old school hash rockets syntax #92 from DmytroStepaniuk
+  * Merged PR Converted whitelist testing to use IPAddr objects. #64 jordanyaker
+  * Added on_success and on_failure callbacks
+  * Makes sure errors are seperated by a period and a space and a period always ends the list of errors
+
+* 3.0.0
+ * First release on rails5 branch
+ * Depends on railties rather than rails so it can be used with trimmed down stacks
+ * Corrected ruby version required to match rails
+ * Cleaned up README
+ * redis_url now defaults to nil (url determined by redis gem)
+ * Cleaned out rails 4.0 dependent code
+ * Cleaned up test code and updated to rails 5 standards, uses smarter_bundler to handle gem ruby version isssues
+ * Added rails 5.1 test
+ * Split all releases to this rails* branchs - master is only for edge development
+
 * 2.7.0
  * Add ability to check health of redis when url is non-standard redis url
 * 2.6.0

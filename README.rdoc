@@ -1,15 +1,16 @@
 = health_check gem
 
-Simple health check of Rails edge apps for use with Pingdom, NewRelic, EngineYard or uptime.openacs.org etc.
+Simple health check of Rails 5.x and 6.x apps for use with Pingdom, NewRelic, EngineYard etc.
 
 The basic goal is to quickly check that rails is up and running and that it has access to correctly configured resources (database, email gateway)
 
-Use gem versions for stable releases, or github branch / commits for development versions:
-* gem versions ~> 3.0 for Rails 5.x, or the {rails5}[https://github.com/ianheggie/health_check/tree/rails5] development branch
-* gem versions ~> 2.0 for Rails 4.x, or the {rails4}[https://github.com/ianheggie/health_check/tree/rails4] development branch;
-* gem versions ~> 1.7 for Rails 3.x, or the {rails3}[https://github.com/ianheggie/health_check/tree/rails3] development branch;
-* gem versions ~> 1.6.1 for Rails 2.3, or the {rails2.3}[https://github.com/ianheggie/health_check/tree/rails2.3] development branch;
-* {master}[https://github.com/ianheggie/health_check/tree/master] branch for edge development;
+Check the latest README {master}[https://github.com/ianheggie/health_check/tree/master] for other versions
+
+Use gem versions for stable releases:
+* ~> 3.x for Rails 5.x and 6.x (etc until there is a proven need to split off another branch),
+* ~> 2.x for Rails 4.x,
+* ~> 1.7 for Rails 3.x,
+* ~> 1.6.3 for Rails 2.3
 
 Note: it is best to pin to a specific commit if using a development branch as sometimes tests break.
 
@@ -31,6 +32,7 @@ health_check provides various monitoring URIs, for example:
 You may also issue POST calls instead of GET to these urls.
 
 On failure (detected by health_check) a 500 http status is returned with a simple explanation of the failure
+(if include_error_in_response_body is true)
 
     curl localhost:3000/health_check/fail
     health_check failed: invalid argument to health_test.
@@ -46,10 +48,12 @@ The health_check controller disables sessions for versions that eagerly load ses
 * database - checks that the current migration level can be read from the database
 * email - basic check of email - :test returns true, :sendmail checks file is present and executable, :smtp sends HELO command to server and checks response
 * migration - checks that the database migration level matches that in db/migrations
+* rabbitmq - RabbitMQ Health Check
 * redis / redis-if-present - checks Redis connectivity
 * resque-redis / resque-redis-if-present - checks Resque connectivity to Redis
 * s3 / s3-if-present - checks proper permissions to s3 buckets
 * sidekiq-redis / sidekiq-redis-if-present - checks Sidekiq connectivity to Redis
+* elasticsearch / elasticsearch-if-present - checks Elasticsearch connectivity
 * site - checks rails is running sufficiently to render text
 
 Some checks have a *-if-present form, which only runs the check if the corresponding library has been required.
@@ -58,13 +62,13 @@ The email gateway is not checked unless the smtp settings have been changed.
 Specify full or include email in the list of checks to verify the smtp settings
 (eg use 127.0.0.1 instead of localhost).
 
-Note: rails 4.0 also checks migrations by default in development mode and throws an ActiveRecord::PendingMigrationError exception (http error 500) if there is an error
+Note: rails also checks migrations by default in development mode and throws an ActiveRecord::PendingMigrationError exception (http error 500) if there is an error
 
 == Installation
 
-Add the following line to Gemfile
+Add the following line to Gemfile (after the rails gems are listed)
 
-    gem "health_check"
+    gem 'health_check'
 
 And then execute
 
@@ -86,6 +90,16 @@ To change the configuration of health_check, create a file `config/initializers/
       # Text output upon success
       config.success = 'success'
 
+      # Text output upon failure
+      config.failure = 'health_check failed'
+
+      # Disable the error message to prevent /health_check from leaking
+      # sensitive information
+      config.include_error_in_response_body = false
+
+      # Log level (success or failure message with error details is sent to rails log unless this is set to nil)
+      config.log_level = 'info'
+
       # Timeout in seconds used when checking smtp server
       config.smtp_timeout = 30.0
 
@@ -96,7 +110,7 @@ To change the configuration of health_check, create a file `config/initializers/
       config.http_status_for_error_text = 500
 
       # http status code used when an error object is output (json or xml)
-      # Set to 200 if you want your want to distinguish between partial (healthy property == false) and
+      # Set to 200 if you want to distinguish between partial (healthy property == false) and
       # total failure of rails application (http status of 500 etc)
 
       config.http_status_for_error_object = 500
@@ -136,19 +150,37 @@ To change the configuration of health_check, create a file `config/initializers/
       config.basic_auth_username = 'my_username'
       config.basic_auth_password = 'my_password'
 
-      # Whitelist requesting IPs
-      # Defaults to blank and allows any IP
-      config.origin_ip_whitelist = %w(123.123.123.123)
+      # Whitelist requesting IPs by a list of IP and/or CIDR ranges, either IPv4 or IPv6 (uses IPAddr.include? method to check)
+      # Defaults to blank which allows any IP
+      config.origin_ip_whitelist = %w(123.123.123.123 10.11.12.0/24 2400:cb00::/32)
+
+      # Use ActionDispatch::Request's remote_ip method when behind a proxy to pick up the real remote IP for origin_ip_whitelist check
+      # Otherwise uses Rack::Request's ip method (the default, and always used by Middleware), which is more susceptable to spoofing
+      # See https://stackoverflow.com/questions/10997005/whats-the-difference-between-request-remote-ip-and-request-ip-in-rails
+      config.accept_proxied_requests = false
 
       # http status code used when the ip is not allowed for the request
       config.http_status_for_ip_whitelist_error = 403
 
-      # When redis url is non-standard
-      config.redis_url = 'redis_url'
+      # rabbitmq
+      config.rabbitmq_config = {}
 
-      # Disable the error message to prevent /health_check from leaking
-      # sensitive information
-      config.include_error_in_response_body = false
+      # When redis url/password is non-standard
+      config.redis_url = 'redis_url' # default ENV['REDIS_URL']
+      # Only included if set, as url can optionally include passwords as well
+      config.redis_password = 'redis_password' # default ENV['REDIS_PASSWORD']
+
+      # Failure Hooks to do something more ...
+      # checks lists the checks requested
+      config.on_failure do |checks, msg|
+        # log msg somewhere
+      end
+    
+      config.on_success do |checks|
+        # flag that everything is well
+      end
+  
+
     end
 
 You may call add_custom_check multiple times with different tests. These tests will be included in the default list ("standard").
@@ -185,7 +217,6 @@ See
 
 * Pingdom Website Monitoring - https://www.pingdom.com
 * NewRelic Availability Monitoring - http://newrelic.com/docs/features/availability-monitoring-faq
-* Uptime by OpenACS - http://uptime.openacs.org/uptime/
 * Engine Yard's guide - https://support.cloud.engineyard.com/entries/20996821-monitor-application-uptime (although the guide is based on fitter_happier plugin it will also work with this gem)
 * Nagios check_http (with -s success) - https://www.nagios-plugins.org/doc/man/check_http.html
 * Any other montoring service that can be set to check for the word success in the text returned from a url
@@ -245,39 +276,33 @@ Cache-control is set with
 
 Last-modified is set to the current time (rounded down to a multiple of max_age when max_age > 1)
 
-== Note on Patches/Pull Requests
-
-<em>Feedback welcome! Especially with suggested replacement code and corresponding tests</em>
-
-1. Fork it
-2. Create your feature branch (<tt>git checkout -b my-new-feature</tt>)
-3. Commit your changes (<tt>git commit -am 'Add some feature'</tt>)
-4. Push to the branch (<tt>git push origin my-new-feature</tt>)
-5. Create new Pull Request.
-
 == Known Issues
 
+* See https://github.com/ianheggie/health_check/issues
 * No inline documentation for methods
 * <b>rvm gemsets breaks the test</b> - specifically <tt>rvm use 1.9.3</tt> works but <tt>rvm gemset use ruby-1.9.3-p385@health_check --create</tt> triggers a "Could not find gem 'coffee-rails (~> 3.2.1) ruby' in the gems available on this machine." error in the last call to bundle (installing health_check as a gem via a path into the temp railsapp)
 
 == Similar projects
 
 * fitter_happier plugin by atmos - plugin with similar goals, but not compatible with uptime, and does not check email gateway
+* HealthBit - inspired by this gem but with a fresh start as a simpler rack only application, no travis CI tests (yet?) but looks interesting.
 
 == Testing
 
 === Automated testing and other checks
 
-* {<img src="https://badge.fury.io/rb/health_check.png" alt="Gem Version" />}[http://badge.fury.io/rb/health_check] - Latest Gem
-* {<img src="https://travis-ci.org/ianheggie/health_check.png">}[https://travis-ci.org/ianheggie/health_check]  - Travis CI
-* {<img src="https://codeclimate.com/github/ianheggie/health_check.png" />}[https://codeclimate.com/github/ianheggie/health_check] - Code quality
-* {<img src="https://gemnasium.com/ianheggie/health_check.png">}[https://gemnasium.com/ianheggie/health_check] - Gem dependencies
+* {<img src="https://badge.fury.io/rb/health_check.svg" alt="Gem Version" />}[http://badge.fury.io/rb/health_check] - Latest Gem
+* {<img src="https://travis-ci.org/ianheggie/health_check.svg">}[https://travis-ci.org/ianheggie/health_check]  - Travis CI
+* {<img src="https://codeclimate.com/github/ianheggie/health_check.svg" />}[https://codeclimate.com/github/ianheggie/health_check] - Code quality
+* {<img src="https://gemnasium.com/ianheggie/health_check.svg">}[https://gemnasium.com/ianheggie/health_check] - Gem dependencies
 
 === Manual testing
 
-The instructions have been changed to using a vagrant virtual box for consistant results.
+The instructions have been changed to using a vagrant virtual box for consistent results.
 
-Install vagrant 1.9.7 or later and virtual_box or other local virtual machine providor.
+Install vagrant 1.9.7 or later and virtual_box or other local virtual machine provider.  Add the vagrant plugin called vbguest.
+
+    vagrant plugin install vagrant-vbguest
 
 Create a temp directory for throw away testing, and clone the health_check gem into it
 
@@ -321,7 +346,7 @@ The command `rake test` will also launch these tests, except it cannot install t
 
 == Copyright
 
-Copyright (c) 2010-2017 Ian Heggie, released under the MIT license.
+Copyright (c) 2010-2021 Ian Heggie, released under the MIT license.
 See MIT-LICENSE for details.
 
 == Contributors
@@ -330,8 +355,18 @@ Thanks go to the various people who have given feedback and suggestions via the 
 
 === Contributing
 
+Use gem versions for stable releases, or github branch / commits for development versions:
+* for Rails 5.x and 6.x use feature branched off master {master}[https://github.com/ianheggie/health_check/tree/master] for development;
+* for Rails 4.x use feature branches off the {rails4}[https://github.com/ianheggie/health_check/tree/rails4] stable branch for development;
+* for Rails 3.x use feature branches off the {rails3}[https://github.com/ianheggie/health_check/tree/rails3] stable branch for development;
+* for Rails 2.3 use feature branches off the {rails2.3}[https://github.com/ianheggie/health_check/tree/rails2.3] stable branch for development;
+
 1. Fork it
 2. Create your feature branch (`git checkout -b my-new-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin my-new-feature`)
-5. Create new Pull Request (Code with BDD tests are favoured)
+3. Create a test that confirms your changes work
+4. Update README.rdoc to explain enhancements, or add succinct comment in code when fixing bugs
+5. Commit your changes (`git commit -am 'Add some feature'`)
+6. Push to the branch (`git push origin my-new-feature`)
+7. Create new Pull Request (Code with BDD tests and documentation are highly favoured)
+
+<em>Feedback welcome! Especially with suggested replacement code, tests and documentation</em>
